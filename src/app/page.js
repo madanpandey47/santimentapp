@@ -20,6 +20,7 @@ export default function Home() {
         const res = await fetch("/api/market", { cache: "no-store" });
         if (!res.ok) throw new Error(`Request failed: ${res.status}`);
         const json = await res.json();
+        console.log("API /api/market response", json);
         setData(json);
       } catch (e) {
         setError(String(e?.message || e));
