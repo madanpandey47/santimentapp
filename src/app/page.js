@@ -20,8 +20,8 @@ export default function Home() {
         const res = await fetch("/api/market", { cache: "no-store" });
         if (!res.ok) throw new Error(`Request failed: ${res.status}`);
         const json = await res.json();
-        console.log("API /api/market response", res);
-        console.log("API /api/market response", json);
+        // console.log("API /api/market response", res);
+        // console.log("API /api/market response", json);
 
         setData(json);
       } catch (e) {
@@ -89,7 +89,7 @@ export default function Home() {
                         <tr className="text-left opacity-70">
                           <th className="py-2">Date</th>
                           <th className="py-2">Price</th>
-                          <th className="py-2">Mkt Cap</th>
+                          <th className="py-2">Market Cap</th>
                           <th className="py-2">Volume</th>
                         </tr>
                       </thead>

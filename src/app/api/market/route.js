@@ -1,123 +1,111 @@
-export const runtime = "nodejs";
+export const runtime = "nodejs"; // Optional, depending on deployment
 
 const SANTIMENT_GQL_ENDPOINT = "https://api.santiment.net/graphql";
+const SLUGS = ["bitcoin", "ethereum", "solana"];
 
-function getISODateNDaysAgo(days) {
-  const d = new Date();
-  d.setUTCHours(0, 0, 0, 0);
-  d.setDate(d.getDate() - days);
-  return d.toISOString();
-}
-
-async function fetchSantimentTimeseries(slug, fromIso, toIso) {
-  const apiKey = process.env.SAN_API_KEY || process.env.NEXT_PUBLIC_SAN_API_KEY;
-  if (!apiKey) {
-    throw new Error("Missing SAN_API_KEY in environment");
-  }
-
-  const query = `
-    query MarketData($slug: String!, $from: DateTime!, $to: DateTime!) {
-      price: getMetric(metric: "price_usd") {
-        timeseriesData(selector: { slug: $slug }, from: $from, to: $to, interval: "1d") {
-          datetime
-          value
-        }
-      }
-      marketcap: getMetric(metric: "marketcap_usd") {
-        timeseriesData(selector: { slug: $slug }, from: $from, to: $to, interval: "1d") {
-          datetime
-          value
-        }
-      }
-      volume: getMetric(metric: "volume_usd") {
-        timeseriesData(selector: { slug: $slug }, from: $from, to: $to, interval: "1d") {
-          datetime
-          value
-        }
+const buildQuery = (slug) => `
+  query {
+    price: getMetric(metric: "price_usd") {
+      timeseriesData(slug: "${slug}", from: "utc_now-5d", to: "utc_now", interval: "1d") {
+        datetime
+        value
       }
     }
-  `;
-
-  const res = await fetch(SANTIMENT_GQL_ENDPOINT, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      Authorization: `Apikey ${apiKey}`,
-    },
-    body: JSON.stringify({
-      query,
-      variables: { slug, from: fromIso, to: toIso },
-    }),
-    // Next.js edge caches by default; this is dynamic data
-    cache: "no-store",
-  });
-
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Santiment API error ${res.status}: ${text}`);
+    marketcap: getMetric(metric: "marketcap_usd") {
+      timeseriesData(slug: "${slug}", from: "utc_now-5d", to: "utc_now", interval: "1d") {
+        datetime
+        value
+      }
+    }
+    volume: getMetric(metric: "volume_usd") {
+      timeseriesData(slug: "${slug}", from: "utc_now-5d", to: "utc_now", interval: "1d") {
+        datetime
+        value
+      }
+    }
   }
+`;
 
-  const json = await res.json();
-  
-  if (json.errors) {
-    throw new Error(JSON.stringify(json.errors));
-  }
-
-  const price = json.data.price.timeseriesData;
-  const marketcap = json.data.marketcap.timeseriesData;
-  const volume = json.data.volume.timeseriesData;
-
-  // Align by datetime
-  const byDate = new Map();
-  for (const p of price) byDate.set(p.datetime, { datetime: p.datetime, price: p.value });
-  for (const m of marketcap) {
-    const row = byDate.get(m.datetime) || { datetime: m.datetime };
-    row.marketcap = m.value;
-    byDate.set(m.datetime, row);
-  }
-  for (const v of volume) {
-    const row = byDate.get(v.datetime) || { datetime: v.datetime };
-    row.volume = v.value;
-    byDate.set(v.datetime, row);
-  }
-
-  return Array.from(byDate.values()).sort((a, b) => a.datetime.localeCompare(b.datetime));
-}
-
-export async function GET() {
+export async function GET(request) {
   try {
-    const toIso = new Date().toISOString();
-    // last 5 full days (5 data points). Fetch 6 to be safe and slice last 5
-    const fromIso = getISODateNDaysAgo(6);
-    const slugs = ["bitcoin", "ethereum", "solana"];
+    const apiKey = process.env.SAN_API_KEY || process.env.NEXT_PUBLIC_SANTIMENT_API_KEY;
+    if (!apiKey) {
+      return new Response(
+        JSON.stringify({ error: "Missing API key in environment variables" }),
+        {
+          status: 500,
+          headers: { "Content-Type": "application/json" },
+        }
+      );
+    }
 
-    const results = await Promise.all(
-      slugs.map(async (slug) => ({ slug, data: await fetchSantimentTimeseries(slug, fromIso, toIso) }))
-    );
+    const results = {};
 
-    // Keep last 5 entries per asset
-    const payload = Object.fromEntries(
-      results.map(({ slug, data }) => [
-        slug,
-        data.slice(-5).map((d) => ({
-          datetime: d.datetime,
-          price: d.price ?? null,
-          marketcap: d.marketcap ?? null,
-          volume: d.volume ?? null,
-        })),
-      ])
-    );
+    for (const slug of SLUGS) {
+      const query = buildQuery(slug);
+      const santimentResponse = await fetch(SANTIMENT_GQL_ENDPOINT, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Apikey ${apiKey}`,
+        },
+        body: JSON.stringify({ query }),
+      });
 
-    return new Response(JSON.stringify(payload), {
+      const responseText = await santimentResponse.text();
+
+      // Log the raw response for debugging
+      console.log(`--- RAW RESPONSE FOR ${slug} START ---`);
+      console.log(responseText);
+      console.log(`--- RAW RESPONSE FOR ${slug} END ---`);
+
+      if (!santimentResponse.ok) {
+        throw new Error(
+          `Santiment API error ${santimentResponse.status}: ${responseText}`
+        );
+      }
+
+      const parsedResponse = JSON.parse(responseText);
+      const data = parsedResponse.data;
+
+      if (!data) {
+        throw new Error(`No data in response for ${slug}: ${responseText}`);
+      }
+
+      const { price, marketcap, volume } = data;
+
+      const combinedDataMap = {};
+
+      price.timeseriesData.forEach((d) => {
+        if (!combinedDataMap[d.datetime]) combinedDataMap[d.datetime] = { datetime: d.datetime };
+        combinedDataMap[d.datetime].price = d.value;
+      });
+
+      marketcap.timeseriesData.forEach((d) => {
+        if (!combinedDataMap[d.datetime]) combinedDataMap[d.datetime] = { datetime: d.datetime };
+        combinedDataMap[d.datetime].marketcap = d.value;
+      });
+
+      volume.timeseriesData.forEach((d) => {
+        if (!combinedDataMap[d.datetime]) combinedDataMap[d.datetime] = { datetime: d.datetime };
+        combinedDataMap[d.datetime].volume = d.value;
+      });
+
+      results[slug] = Object.values(combinedDataMap);
+    }
+
+    return new Response(JSON.stringify(results), {
       status: 200,
-      headers: { "content-type": "application/json" },
+      headers: { "Content-Type": "application/json" },
     });
-  } catch (err) {
-    return new Response(JSON.stringify({ error: String(err?.message || err) }), {
-      status: 500,
-      headers: { "content-type": "application/json" },
-    });
+  } catch (error) {
+    console.error("Santiment API proxy error:", error);
+    return new Response(
+      JSON.stringify({ error: error.message || "Unknown error" }),
+      {
+        status: 500,
+        headers: { "Content-Type": "application/json" },
+      }
+    );
   }
 }
-
-
